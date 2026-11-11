@@ -1,0 +1,8 @@
+.level-mode-picker { min-width: 108px; }
+.levels-toggle:disabled { opacity: .45; cursor: not-allowed; }
+@media (max-width: 1380px) {
+  .topbar { gap: 12px; }
+  .symbol-trigger { width: 210px; }
+  .market-quote { padding-left: 14px; gap: 8px; }
+  .header-actions { gap: 9px; }
+}

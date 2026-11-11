@@ -1,0 +1,17 @@
+.future-quote {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding-left: 12px;
+  border-left: 1px solid #dedede;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.future-quote small {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  color: #777;
+}
+.future-quote b { font-size: 13px; color: #222; }
+.future-quote.unavailable b { color: #aaa; }
