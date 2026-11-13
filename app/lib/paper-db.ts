@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
-import { PAPER_POSITIONS_SCHEMA, PAPER_SIGNALS_SCHEMA, PAPER_STATUS_INDEX, PAPER_OPEN_TIME_INDEX } from '@/db/schema';
+import { PAPER_POSITIONS_SCHEMA, PAPER_SIGNALS_SCHEMA, PAPER_DAILY_STATE_SCHEMA, PAPER_STATUS_INDEX, PAPER_OPEN_TIME_INDEX } from '@/db/schema';
 let database: Database.Database;
 export function paperDb() {
   if (!database) {
@@ -8,7 +8,7 @@ export function paperDb() {
     mkdirSync(dir, { recursive: true });
     database = new Database(`${dir}/paper.sqlite3`);
     database.pragma('journal_mode = WAL');
-    database.exec([PAPER_POSITIONS_SCHEMA, PAPER_SIGNALS_SCHEMA, PAPER_STATUS_INDEX, PAPER_OPEN_TIME_INDEX].join(';'));
+    database.exec([PAPER_POSITIONS_SCHEMA, PAPER_SIGNALS_SCHEMA, PAPER_DAILY_STATE_SCHEMA, PAPER_STATUS_INDEX, PAPER_OPEN_TIME_INDEX].join(';'));
   }
   const wrap = (sql: string, values: any[] = []) => ({
     bind: (...args: any[]) => wrap(sql, args),

@@ -32,15 +32,10 @@ const schema = load('db/schema.ts', {});
 const db = new Database(':memory:');
 db.exec(Object.values(schema).join(';'));
 function prepare(sql, values=[]) {return {bind: (...args)=>prepare(sql,args), run:async()=>({meta:{changes:db.prepare(sql).run(...values).changes}}), all:async()=>({results:db.prepare(sql).all(...values)}), first:async()=>db.prepare(sql).get(...values)};}
-let sourceSide = 'CE', kind = 'lower', minute = 0;
+let sourceSide = 'CE';
 const histories = () => {
  const candle = (timestamp, open, low, high, close) => ({timestamp,open,low,high,close});
- return [1,2].map(id => {
-  const active = (sourceSide === 'CE' ? 1 : 2) === id;
-  const low = active ? (kind === 'lower' ? 280 : 500) : 390;
-  const high = active ? (kind === 'lower' ? 300 : 520) : 410;
-  return [candle(prior,900,890,910,900),candle(stamp-1800,400,395,405,400),candle(stamp+minute*60,400,low,high,400)];
- });
+ return [1,2].map(() => [candle(prior,900,890,910,900),candle(stamp-1800,400,395,405,400),candle(stamp,400,390,410,400)]);
 };
 const chain = { data: { last_price: 25000, oc: {} } };
 const route = load('app/api/paper/tick/route.ts', {
@@ -52,25 +47,30 @@ const route = load('app/api/paper/tick/route.ts', {
 }, {Date:class extends Date {constructor(...args){super(...(args.length?args:[fixedNow]));}static now(){return fixedNow;}},fetch:async()=>({ok:true,text:async()=> 'SEM_SMST_SECURITY_ID,SEM_LOT_UNITS\n1,1\n2,1'})});
 (async()=>{
  for(const asset of ['NIFTY','BANKNIFTY','SENSEX']) {
-  // Asset-specific strikes, with the same contract premium grid.
+ // Asset-specific strikes, with the same contract premium grid.
   const step = asset==='NIFTY'?50:100;
-  chain.data.oc = {[25000-2*step]:{ce:{security_id:1,last_price:400}},[25000+2*step]:{pe:{security_id:2,last_price:400}}};
-  for(sourceSide of ['CE','PE']) for(kind of ['lower','upper']) {
-   db.exec('DELETE FROM paper_positions; DELETE FROM paper_signals'); minute=0;
+  const entryLevel = asset === 'NIFTY' ? 340 : 280;
+  for(sourceSide of ['CE','PE']) {
+   db.exec('DELETE FROM paper_positions; DELETE FROM paper_signals; DELETE FROM paper_daily_state');
+   chain.data.oc = {};
+   for (let offset=-5; offset<=5; offset++) chain.data.oc[25000+offset*step] = {
+     ce:{security_id:offset===0?1:100+offset,last_price:offset===0?(sourceSide==='CE'?entryLevel+1:400):20,oi:sourceSide==='PE'?200:100},
+     pe:{security_id:offset===0?2:200+offset,last_price:offset===0?(sourceSide==='PE'?entryLevel+1:400):20,oi:sourceSide==='CE'?200:100},
+   };
    const request={nextUrl:new URL(`http://local/api/paper/tick?asset=${asset}`)};
    let result=await route.POST(request); assert.equal(result.body.ok,true,JSON.stringify(result));assert.equal(result.body.opened,1);
    const p=db.prepare('SELECT * FROM paper_positions').get();
-   assert.equal(p.side,kind==='lower'?sourceSide:(sourceSide==='CE'?'PE':'CE'));
-   assert.equal(p.entry_price,kind==='lower'?280:400);
-   assert.equal(p.stop_price,kind==='lower'?250:370);
-   assert.equal(p.target_price,kind==='lower'?400:460);
-   assert.equal(p.signal_level,kind==='lower'?280:520);
+   assert.equal(p.side,sourceSide);
+   assert.equal(p.entry_price,entryLevel+1);
+   assert.equal(p.stop_price,asset==='NIFTY'?310:250);
+   assert.equal(p.target_price,asset==='NIFTY'?400:340);
+   assert.equal(p.signal_level,entryLevel);
+   assert.equal(result.body.strikeCount,11);
+   assert.equal(sourceSide==='CE' ? result.body.putOi > result.body.callOi : result.body.callOi > result.body.putOi, true);
    const repeated=await Promise.all([route.POST(request),route.POST(request)]);
    assert.equal(repeated.reduce((sum,r)=>sum+r.body.opened,0),0);
    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM paper_positions').get().n,1);
-   minute=1;result=await route.POST(request);assert.equal(result.body.opened,1);
-   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM paper_positions').get().n,2);
   }
  }
- console.log('Passed: 16 exact levels, day-open selection, wick touches, both entry directions across all three indices, stops/targets, concurrent duplicate prevention and later-candle signals.');
+ console.log('Passed: formula grid, fixed daily ATM, 11-strike OI sums, both CE/PE confirmations, index-specific entry/stop/target levels, and duplicate prevention.');
 })().catch(error=>{console.error(error);process.exitCode=1});

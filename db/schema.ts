@@ -33,6 +33,17 @@ export const PAPER_SIGNALS_SCHEMA = `
   )
 `;
 
+export const PAPER_DAILY_STATE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS paper_daily_state (
+    trading_date TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    opening_atm REAL NOT NULL,
+    expiry TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (trading_date, asset)
+  )
+`;
+
 export const PAPER_STATUS_INDEX = `
   CREATE INDEX IF NOT EXISTS idx_paper_positions_status_asset
   ON paper_positions(status, asset)

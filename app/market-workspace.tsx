@@ -55,6 +55,34 @@ type Candle = {
   volume: number;
   time: string;
 };
+function calculateTradingIndicators(bars: Candle[]) {
+  const closes = bars.map((bar) => bar.close);
+  const sma21 = closes.length >= 21
+    ? closes.slice(-21).reduce((sum, close) => sum + close, 0) / 21
+    : null;
+  const bandCloses = closes.slice(-20);
+  const middle = bandCloses.length === 20
+    ? bandCloses.reduce((sum, close) => sum + close, 0) / 20
+    : null;
+  const deviation = middle === null
+    ? null
+    : Math.sqrt(bandCloses.reduce((sum, close) => sum + (close - middle) ** 2, 0) / 20);
+  const bollinger = middle !== null && deviation !== null
+    ? { lower: middle - 2 * deviation, middle, upper: middle + 2 * deviation }
+    : null;
+  const lastTimestamp = bars.at(-1)?.timestamp;
+  const sessionKey = lastTimestamp
+    ? new Date(lastTimestamp * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+    : '';
+  const sessionBars = sessionKey
+    ? bars.filter((bar) => bar.timestamp && new Date(bar.timestamp * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) === sessionKey)
+    : bars;
+  const volume = sessionBars.reduce((sum, bar) => sum + Math.max(0, bar.volume), 0);
+  const vwap = volume > 0
+    ? sessionBars.reduce((sum, bar) => sum + ((bar.high + bar.low + bar.close) / 3) * Math.max(0, bar.volume), 0) / volume
+    : null;
+  return { sma21, bollinger, vwap };
+}
 type ChartLevel = { value: number; label: string; color: string };
 type ChartOiLevel = { strike: number; callOi: number; putOi: number };
 type DrawingTool = 'CURSOR' | 'HORIZONTAL' | 'TEXT' | 'SCALE' | 'TREND';
@@ -131,6 +159,32 @@ type PaperPosition = {
   targetPrice: number;
   closeReason: string | null;
   signalType: string;
+  asset: AssetKey;
+};
+type PaperSignal = {
+  side: Side;
+  contract: { strike: number; ltp: number };
+  dayOpen: number;
+  entryLevel: number;
+  bandHigh: number;
+  stop: number;
+  target: number;
+  inBand: boolean;
+  oiMatched: boolean;
+};
+type PaperEngineSnapshot = {
+  ok: boolean;
+  asset: AssetKey;
+  spot: number;
+  openingAtm: number;
+  expiry: string;
+  strikeCount: number;
+  callOi: number;
+  putOi: number;
+  marketOpen: boolean;
+  signals: PaperSignal[];
+  updatedAt: string;
+  error?: string;
 };
 const TIMEFRAMES: Timeframe[] = [
   '1m',
@@ -730,7 +784,7 @@ function Chart({
     window.addEventListener('keydown', removeSelected);
     return () => window.removeEventListener('keydown', removeSelected);
   }, [onDrawingsChange, selectedDrawingId]);
-  if (!candles.length) return <section className="chart-panel"><div className="chart-head">{title}</div><div className="chart-empty">Waiting for Dhan candles</div></section>;
+  if (!candles.length) return <section className={`chart-panel ${accent ? 'active-chart' : ''}`} onPointerDownCapture={onActivate}><div className="chart-head">{title}</div><div className="chart-empty">Waiting for Dhan candles</div></section>;
   const width = size.width,
     height = size.height,
     timeAxisTop = height - 42,
@@ -1501,11 +1555,13 @@ function PositionsView({
   onModeChange,
   positions,
   engineStatus,
+  snapshots,
 }: {
   mode: PaperMode;
   onModeChange: (mode: PaperMode) => void;
   positions: PaperPosition[];
   engineStatus: string;
+  snapshots: PaperEngineSnapshot[];
 }) {
   const startingCapital = 100000;
   const visiblePositions = positions.filter((position) => position.mode === mode);
@@ -1551,6 +1607,46 @@ function PositionsView({
         </div>
       </div>
 
+      <div className="strategy-board">
+        <header>
+          <div><span className="eyebrow">TWO-CONDITION ENTRY</span><h2>Live trade scanner</h2><p>Maximum one trade per index per trading day.</p></div>
+          <span className={`engine-state ${snapshots.length ? 'active' : ''}`}><i /> {engineStatus}</span>
+        </header>
+        <div className="strategy-cards">
+          {(['NIFTY', 'BANKNIFTY', 'SENSEX'] as AssetKey[]).map((assetKey) => {
+            const snapshot = snapshots.find((item) => item.asset === assetKey);
+            const assetPositions = visiblePositions.filter((position) => position.asset === assetKey && position.status === 'OPEN');
+            return <article className="strategy-card" key={assetKey}>
+              <div className="strategy-title">
+                <div><strong>{assetKey === 'BANKNIFTY' ? 'BANK NIFTY' : assetKey}</strong><span>Opening ATM {snapshot ? snapshot.openingAtm.toLocaleString('en-IN') : '—'}</span></div>
+                <b className={assetPositions.length ? 'formed' : snapshot?.signals.some((signal) => signal.inBand || signal.oiMatched) ? 'forming' : 'waiting'}>
+                  {assetPositions.length ? 'TRADE LIVE' : snapshot?.signals.some((signal) => signal.inBand || signal.oiMatched) ? 'FORMING' : 'WAITING'}
+                </b>
+              </div>
+              <div className="oi-balance">
+                <span><small>CALL OI · 11 strikes</small><strong>{snapshot ? formatOi(snapshot.callOi) : '—'}</strong></span>
+                <em>{snapshot ? (snapshot.putOi > snapshot.callOi ? 'PUT SUPPORT' : snapshot.callOi > snapshot.putOi ? 'CALL RESISTANCE' : 'BALANCED') : 'LOADING'}</em>
+                <span><small>PUT OI · 11 strikes</small><strong>{snapshot ? formatOi(snapshot.putOi) : '—'}</strong></span>
+              </div>
+              <div className="signal-table">
+                {(snapshot?.signals || []).map((signal) => {
+                  const position = assetPositions.find((item) => item.side === signal.side);
+                  const matched = signal.inBand && signal.oiMatched;
+                  return <div className={`signal-row ${position ? 'live' : matched ? 'ready' : ''}`} key={signal.side}>
+                    <strong>{signal.side}</strong>
+                    <span><i className={signal.inBand ? 'met' : ''}>{signal.inBand ? '✓' : '○'}</i><small>Premium in band</small><b>₹{formatPrice(signal.contract.ltp)} <em>₹{formatPrice(signal.entryLevel)}–{formatPrice(signal.bandHigh)}</em></b></span>
+                    <span><i className={signal.oiMatched ? 'met' : ''}>{signal.oiMatched ? '✓' : '○'}</i><small>OI direction</small><b>{signal.side === 'CE' ? 'Put OI > Call OI' : 'Call OI > Put OI'}</b></span>
+                    <span><small>Stop / Target</small><b>₹{formatPrice(signal.stop)} / ₹{formatPrice(signal.target)}</b></span>
+                    <span className="signal-action">{position ? `BOUGHT · P&L ${formatCurrency(position.pnl)}` : matched ? 'ENTRY READY' : 'MONITORING'}</span>
+                  </div>;
+                })}
+                {!snapshot && <div className="signal-loading">Connecting to live option chain…</div>}
+              </div>
+            </article>;
+          })}
+        </div>
+      </div>
+
       <div className="capital-grid">
         <article>
           <span>Starting capital</span>
@@ -1580,7 +1676,7 @@ function PositionsView({
             <h2>{mode === 'FORWARD' ? 'Forward-test positions' : 'Backtest positions'}</h2>
             <span>Strategy execution ledger</span>
           </div>
-          <span className={`engine-state ${engineStatus === 'Monitoring live data' ? 'active' : ''}`}><i /> {engineStatus}</span>
+          <span className={`engine-state ${snapshots.length ? 'active' : ''}`}><i /> {engineStatus}</span>
         </header>
         <div className="position-table-wrap">
           <table>
@@ -1625,7 +1721,7 @@ function PositionsView({
             <div className="positions-empty">
               <span><BriefcaseBusiness /></span>
               <strong>No paper positions yet</strong>
-              <p>The engine is monitoring the two-strikes-ITM CE and PE contracts. Valid T3 trades will appear here automatically.</p>
+              <p>The engine is monitoring the fixed opening-ATM CE and PE contracts. A trade appears only when its premium band and 11-strike OI direction both match.</p>
             </div>
           )}
         </div>
@@ -1661,7 +1757,8 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
   const [appView, setAppView] = useState<'MARKET' | 'POSITIONS'>('MARKET');
   const [paperMode, setPaperMode] = useState<PaperMode>('FORWARD');
   const [paperPositions, setPaperPositions] = useState<PaperPosition[]>([]);
-  const [paperEngineStatus] = useState('Use maintenance.py for unattended monitoring');
+  const [paperSnapshots, setPaperSnapshots] = useState<PaperEngineSnapshot[]>([]);
+  const [paperEngineStatus, setPaperEngineStatus] = useState('Connecting to live data');
   const [asset, setAsset] = useState<AssetKey>('NIFTY');
   const [side, setSide] = useState<Side>('CE');
   const [selectedStrike, setSelectedStrike] = useState(0);
@@ -1686,7 +1783,7 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
   const [hoveredQuote, setHoveredQuote] = useState<(OptionQuote & { key: string }) | null>(null);
   const [underlyingTimeframe, setUnderlyingTimeframe] = useState<Timeframe>('5m');
   const [optionTimeframe, setOptionTimeframe] = useState<Timeframe>('5m');
-  const [activeChart, setActiveChart] = useState<'UNDERLYING' | 'OPTION'>('OPTION');
+  const [activeChart, setActiveChart] = useState<'UNDERLYING' | 'OPTION' | 'OPPOSITE'>('UNDERLYING');
   const [linkedCrosshairTimestamp, setLinkedCrosshairTimestamp] = useState<number | null>(null);
   const [hoveredCrosshair, setHoveredCrosshair] = useState<SyncedCrosshair | null>(null);
   const [drawingBook, setDrawingBook] = useState<Record<string, ChartDrawing[]>>(() => {
@@ -1694,7 +1791,9 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
     try { return JSON.parse(localStorage.getItem('manju-chart-drawings') || '{}'); }
     catch { return {}; }
   });
-  const [chainPercent, setChainPercent] = useState(28);
+  const [chainPercent, setChainPercent] = useState(20);
+  const [chainExpanded, setChainExpanded] = useState(false);
+  const chainScrollRef = useRef<HTMLDivElement | null>(null);
   const [chartSplit, setChartSplit] = useState(50);
   const [indexWorkspaceView, setIndexWorkspaceView] = useState<IndexWorkspaceView>('ALL');
   const [chartFocusMode, setChartFocusMode] = useState<ChartFocusMode>('NONE');
@@ -1779,6 +1878,43 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
     load();
     return () => { active = false; clearTimeout(timer); };
   }, [canViewPositions]);
+  useEffect(() => {
+    if (!canViewPositions || appView !== 'POSITIONS') return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const scan = async () => {
+      try {
+        let connected = 0;
+        const results = await Promise.allSettled((['NIFTY', 'BANKNIFTY', 'SENSEX'] as AssetKey[]).map(async (paperAsset) => {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 60000);
+          try {
+            const response = await fetch(`/manju/api/paper/tick?asset=${paperAsset}`, { method: 'POST', cache: 'no-store', signal: controller.signal });
+            const result = await response.json() as PaperEngineSnapshot;
+            if (!response.ok || !result.ok) throw new Error(result.error || `${paperAsset} scan unavailable`);
+            if (active) {
+              connected += 1;
+              setPaperSnapshots((current) => [...current.filter((item) => item.asset !== paperAsset), result]);
+              setPaperEngineStatus(connected === 3 ? 'Monitoring live data' : `${connected}/3 indices connected`);
+            }
+            return result;
+          } finally { clearTimeout(timeout); }
+        }));
+        if (active) {
+          const healthy = results.filter((result): result is PromiseFulfilledResult<PaperEngineSnapshot> => result.status === 'fulfilled').map((result) => result.value);
+          setPaperEngineStatus(healthy.length === 3 ? 'Monitoring live data' : healthy.length ? `${healthy.length}/3 indices connected` : 'Live scan reconnecting');
+          const positionsResponse = await fetch('/manju/api/paper/positions', { cache: 'no-store' });
+          if (positionsResponse.ok) setPaperPositions((await positionsResponse.json()).positions || []);
+        }
+      } catch {
+        if (active) setPaperEngineStatus('Live scan reconnecting');
+      } finally {
+        if (active) timer = setTimeout(scan, 5000);
+      }
+    };
+    scan();
+    return () => { active = false; clearTimeout(timer); };
+  }, [canViewPositions, appView]);
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
@@ -2173,34 +2309,7 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
   const underlying = live?.underlyingCandles?.length
     ? live.underlyingCandles
     : [];
-  const spotIndicators = useMemo(() => {
-    const closes = underlying.map((bar) => bar.close);
-    const sma21 = closes.length >= 21
-      ? closes.slice(-21).reduce((sum, close) => sum + close, 0) / 21
-      : null;
-    const bandCloses = closes.slice(-20);
-    const bandMean = bandCloses.length === 20
-      ? bandCloses.reduce((sum, close) => sum + close, 0) / 20
-      : null;
-    const bandDeviation = bandMean === null
-      ? null
-      : Math.sqrt(bandCloses.reduce((sum, close) => sum + (close - bandMean) ** 2, 0) / 20);
-    const bollinger = bandMean !== null && bandDeviation !== null
-      ? { lower: bandMean - 2 * bandDeviation, middle: bandMean, upper: bandMean + 2 * bandDeviation }
-      : null;
-    const lastTimestamp = underlying.at(-1)?.timestamp;
-    const sessionKey = lastTimestamp
-      ? new Date(lastTimestamp * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
-      : '';
-    const sessionBars = sessionKey
-      ? underlying.filter((bar) => bar.timestamp && new Date(bar.timestamp * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) === sessionKey)
-      : underlying;
-    const volume = sessionBars.reduce((sum, bar) => sum + Math.max(0, bar.volume), 0);
-    const vwap = volume > 0
-      ? sessionBars.reduce((sum, bar) => sum + ((bar.high + bar.low + bar.close) / 3) * Math.max(0, bar.volume), 0) / volume
-      : null;
-    return { sma21, bollinger, vwap };
-  }, [underlying, underlyingTimeframe]);
+  const spotIndicators = useMemo(() => calculateTradingIndicators(underlying), [underlying, underlyingTimeframe]);
   const optionSelectionMatches = Boolean(
     (selectedStock
       ? live?.asset === 'STOCK' && live?.symbol === selectedStock.symbol
@@ -2214,6 +2323,12 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
   const optionCandles = optionSelectionMatches && live?.optionCandles?.length
     ? live.optionCandles
     : [];
+  const optionIndicators = useMemo(() => calculateTradingIndicators(optionCandles), [optionCandles, optionTimeframe]);
+  const oppositeIndicators = useMemo(() => calculateTradingIndicators(oppositeOption?.candles || []), [oppositeOption?.candles, optionTimeframe]);
+  const activeIndicators = activeChart === 'UNDERLYING' ? spotIndicators : activeChart === 'OPPOSITE' ? oppositeIndicators : optionIndicators;
+  const activeIndicatorLabel = activeChart === 'UNDERLYING'
+    ? `SPOT · ${underlyingTimeframe}`
+    : `${activeChart === 'OPPOSITE' ? oppositeOption?.side || 'OPTION' : side} OPTION · ${optionTimeframe}`;
   const weeklyOpen = selectedStock ? live?.weeklyOpen || 0 : live?.weeklyOpen || meta.weeklyOpen;
   const dayOpen = selectedStock ? live?.dayOpen || 0 : live?.dayOpen || meta.spot;
   const activeLevelMode = selectedStock ? stockLevelMode : levelMode;
@@ -2259,10 +2374,12 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
   const oppositeDrawingKey = `option:${selectedStock?.securityId || asset}:${expiry}:${selectedStrike}:${oppositeOption?.side || (side === 'CE' ? 'PE' : 'CE')}`;
   const oppositeDrawings = drawingBook[oppositeDrawingKey] || [];
   const chainRows = live?.chain?.length
-    ? live.chain.filter((row) => Math.abs(row.strike - atm) <= strikeStep * 6)
+    ? live.chain
+        .filter((row) => Math.abs(row.strike - atm) <= strikeStep * 8)
+        .sort((a, b) => b.strike - a.strike)
     : selectedStock
       ? []
-      : mockStrikes.map((strike) => ({ strike, ce: null, pe: null }));
+      : mockStrikes.map((strike) => ({ strike, ce: null, pe: null })).sort((a, b) => b.strike - a.strike);
   const oiSeries = chainRows.map((row, i) => ({
     ce: row.ce?.oi ?? Math.round(42000 + Math.abs(i - 6) * 14500 + i * 1900),
     pe: row.pe?.oi ?? Math.round(51000 + Math.abs(i - 6) * 12800 + (12 - i) * 2300),
@@ -2271,10 +2388,21 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
     pePrevious:
       row.pe?.previousOi ?? Math.round(31000 + Math.abs(i - 6) * 8100),
   }));
-  const maxVisibleOi = Math.max(
-    1,
-    ...oiSeries.flatMap((row) => [row.ce, row.pe]),
-  );
+  const maxVisibleCeOi = Math.max(1, ...oiSeries.map((row) => row.ce));
+  const maxVisiblePeOi = Math.max(1, ...oiSeries.map((row) => row.pe));
+  const maxVisibleCeOiChange = Math.max(1, ...oiSeries.map((row) => Math.abs(row.ce - row.cePrevious)));
+  const maxVisiblePeOiChange = Math.max(1, ...oiSeries.map((row) => Math.abs(row.pe - row.pePrevious)));
+  const maxVisibleCeVolume = Math.max(1, ...chainRows.map((row) => row.ce?.volume || 0));
+  const maxVisiblePeVolume = Math.max(1, ...chainRows.map((row) => row.pe?.volume || 0));
+  useEffect(() => {
+    if (!chainExpanded) return;
+    const container = chainScrollRef.current;
+    const atmRow = container?.querySelector<HTMLElement>('[data-atm-row="true"]');
+    if (!container || !atmRow) return;
+    const containerBox = container.getBoundingClientRect();
+    const atmBox = atmRow.getBoundingClientRect();
+    container.scrollTop += atmBox.top - containerBox.top - (container.clientHeight - atmBox.height) / 2;
+  }, [atm, chainExpanded, chainRows.length]);
   const underlyingOiProfile: ChartOiLevel[] = chainRows
     .filter((row) => row.ce || row.pe)
     .map((row) => ({
@@ -2553,13 +2681,13 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
             <i /> {live ? 'MARKET LIVE' : 'DEMO DATA'}
           </span>
         </div>
-        {!focusActive && <div className="spot-indicators" aria-label={`Spot chart indicators for ${underlyingTimeframe}`}>
-          <span className="spot-indicator-timeframe">SPOT · {underlyingTimeframe}</span>
-          <span title="Bollinger Bands, 20 period, 2 standard deviations"><small>BB(20,2)</small><b>{spotIndicators.bollinger ? `${formatPrice(spotIndicators.bollinger.lower)} / ${formatPrice(spotIndicators.bollinger.middle)} / ${formatPrice(spotIndicators.bollinger.upper)}` : '—'}</b></span>
-          <span title="Simple moving average over 21 candles"><small>SMA21</small><b>{spotIndicators.sma21 === null ? '—' : formatPrice(spotIndicators.sma21)}</b></span>
-          <span title="Session VWAP from underlying candles and volume"><small>VWAP</small><b>{spotIndicators.vwap === null ? '—' : formatPrice(spotIndicators.vwap)}</b></span>
-        </div>}
         <div className="header-actions">
+          {!focusActive && <div className="spot-indicators" aria-label={`${activeIndicatorLabel} indicators`}>
+            <span className="spot-indicator-timeframe">{activeIndicatorLabel}</span>
+            <span title="Bollinger Bands, 20 period, 2 standard deviations"><small>BB(20,2)</small><b>{activeIndicators.bollinger ? `${formatPrice(activeIndicators.bollinger.lower)} / ${formatPrice(activeIndicators.bollinger.middle)} / ${formatPrice(activeIndicators.bollinger.upper)}` : '—'}</b></span>
+            <span title="Simple moving average over 21 candles"><small>SMA21</small><b>{activeIndicators.sma21 === null ? '—' : formatPrice(activeIndicators.sma21)}</b></span>
+            <span title="Session VWAP from active chart candles and volume"><small>VWAP</small><b>{activeIndicators.vwap === null ? '—' : formatPrice(activeIndicators.vwap)}</b></span>
+          </div>}
           {!stockOnlyView && <label className="workspace-view-picker" title="Choose which workspace panel fills the screen">
             <span>VIEW</span>
             <select
@@ -2756,8 +2884,8 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
               onLevelModeChange={setOptionLevelMode}
               showCandlePopover
               previousClose={oppositeOption.previousClose}
-              accent={activeChart === 'OPTION'}
-              onActivate={() => setActiveChart('OPTION')}
+              accent={activeChart === 'OPPOSITE'}
+              onActivate={() => setActiveChart('OPPOSITE')}
               darkMode={darkMode}
               linkedCrosshairTimestamp={linkedCrosshairTimestamp}
               onLinkedCrosshairChange={setLinkedCrosshairTimestamp}
@@ -2775,11 +2903,19 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
           : <ResizeHandle
               onDrag={(delta) =>
                 setChainPercent((value) =>
-                  Math.min(45, Math.max(20, value - (delta / Math.max(window.innerWidth, 1)) * 100)),
+                  Math.min(40, Math.max(15, value - (delta / Math.max(window.innerWidth, 1)) * 100)),
                 )
               }
             />)}
-        {showChainArea && <aside className="chain-panel">
+        {showChainArea && chainExpanded && (
+          <button
+            type="button"
+            className="chain-modal-backdrop"
+            aria-label="Close expanded option chain"
+            onClick={() => setChainExpanded(false)}
+          />
+        )}
+        {showChainArea && <aside className={`chain-panel ${chainExpanded ? 'chain-expanded' : 'chain-compact'}`}>
           {selectedStock && live && !live.expiries?.length && (
             <div className="stock-chain-disabled">
               <strong>No listed options for {selectedStock.symbol}</strong>
@@ -2791,9 +2927,20 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
               <span className="eyebrow">DERIVATIVES</span>
               <h2>Option chain</h2>
             </div>
-            <button aria-label="Refresh chain">
-              <RefreshCw />
-            </button>
+            <div className="chain-head-actions">
+              <button aria-label="Refresh chain" title="Refresh option chain">
+                <RefreshCw />
+              </button>
+              <button
+                type="button"
+                className="chain-expand-button"
+                aria-label={chainExpanded ? 'Close expanded option chain' : 'Expand option chain'}
+                title={chainExpanded ? 'Close expanded option chain' : 'Expand option chain'}
+                onClick={() => setChainExpanded((value) => !value)}
+              >
+                {chainExpanded ? <X /> : <Maximize2 />}
+              </button>
+            </div>
           </div>
           <div className="chain-controls">
             <label>
@@ -2837,12 +2984,11 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
           </div>
           <div className={`chain-table view-${chainView.toLowerCase()}`}>
             <div className="chain-row chain-labels">
-              <span>{stockOnlyView ? 'CALL OI / VOL' : 'CALL LTP'}</span>
+              <span className="chain-side-labels call-labels"><b>LTP</b><b>OI</b><b>OI CHG</b><b>VOL</b></span>
               <span>STRIKE</span>
-              <span>{stockOnlyView ? 'PUT OI / VOL' : 'PUT LTP'}</span>
-              <span>OI PROFILE</span>
+              <span className="chain-side-labels put-labels"><b>LTP</b><b>OI</b><b>OI CHG</b><b>VOL</b></span>
             </div>
-            <div className="chain-scroll">
+            <div className="chain-scroll" ref={chainScrollRef}>
               {chainRows.map((row, i) => {
                 const strike = row.strike;
                 const d = (strike - atm) / strikeStep;
@@ -2854,9 +3000,17 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
                 const peChange = row.pe?.previousClose
                   ? ((pe - row.pe.previousClose) / row.pe.previousClose) * 100
                   : 0;
+                const cePointChange = row.ce?.previousClose ? ce - row.ce.previousClose : 0;
+                const pePointChange = row.pe?.previousClose ? pe - row.pe.previousClose : 0;
                 const oi = oiSeries[i];
                 const ceOiChange = oi.ce - oi.cePrevious;
                 const peOiChange = oi.pe - oi.pePrevious;
+                const ceOiPercent = Math.round((oi.ce / maxVisibleCeOi) * 100);
+                const peOiPercent = Math.round((oi.pe / maxVisiblePeOi) * 100);
+                const ceOiChangePercent = Math.round((Math.abs(ceOiChange) / maxVisibleCeOiChange) * 100);
+                const peOiChangePercent = Math.round((Math.abs(peOiChange) / maxVisiblePeOiChange) * 100);
+                const ceVolumePercent = Math.round(((row.ce?.volume || 0) / maxVisibleCeVolume) * 100);
+                const peVolumePercent = Math.round(((row.pe?.volume || 0) / maxVisiblePeVolume) * 100);
                 const isAtm = strike === atm;
                 const strikeSupport = underlyingLevels
                   .filter((level) => level.value < strike)
@@ -2867,14 +3021,11 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
                 return (
                   <div
                     className={`chain-row ${isAtm ? 'atm' : ''}`}
+                    data-atm-row={isAtm ? 'true' : undefined}
                     key={strike}
                   >
-                    {stockOnlyView ? <div className="stock-option-metric call-data">
-                      <b>{formatOi(oi.ce)}</b>
-                      <small>OI</small>
-                      <small>Vol {formatOi(row.ce?.volume || 0)}</small>
-                    </div> : <button
-                      className={`option-price ${
+                    <button
+                      className={`option-price chain-leg call-leg ${
                         selectedStrike === strike && side === 'CE'
                           ? 'selected'
                           : ''
@@ -2888,13 +3039,10 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
                         setLevelPopoverStrike(null);
                       }}
                     >
-                      {formatPrice(ce)}
-                      <small
-                        className={ceChange >= 0 ? 'positive' : 'negative'}
-                      >
-                        {ceChange >= 0 ? '+' : ''}
-                        {ceChange.toFixed(1)}%
-                      </small>
+                      <span className="chain-metric"><b>{formatPrice(ce)}</b><small className={cePointChange >= 0 ? 'positive' : 'negative'}>{cePointChange >= 0 ? '+' : ''}{formatPrice(cePointChange)} ({ceChange >= 0 ? '+' : ''}{ceChange.toFixed(1)}%)</small></span>
+                      <span className={`chain-metric oi-strength resistance ${ceOiPercent === 100 ? 'maximum' : ceOiPercent > 80 ? 'strong' : ceOiPercent === 80 ? 'threshold' : ''}`}><b>{ceOiPercent}%</b><small>{formatOi(oi.ce)}</small></span>
+                      <span className={`chain-metric oi-strength resistance ${ceOiChangePercent === 100 ? 'maximum' : ceOiChangePercent > 80 ? 'strong' : ceOiChangePercent === 80 ? 'threshold' : ''}`}><b>{ceOiChangePercent}%</b><small className={ceOiChange >= 0 ? 'positive' : 'negative'}>{formatOi(ceOiChange)}</small></span>
+                      <span className={`chain-metric oi-strength resistance ${ceVolumePercent === 100 ? 'maximum' : ceVolumePercent > 80 ? 'strong' : ceVolumePercent === 80 ? 'threshold' : ''}`}><b>{ceVolumePercent}%</b><small>{formatOi(row.ce?.volume || 0)}</small></span>
                       {hoveredOption?.key === `${strike}-CE` && (
                         <span className="option-quote-popover" role="tooltip">
                           <strong>{displayShort} {strike.toLocaleString('en-IN')} CE</strong>
@@ -2908,7 +3056,7 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
                           </> : <em>Loading Dhan quote…</em>}
                         </span>
                       )}
-                    </button>}
+                    </button>
                     <button
                       className="strike"
                       data-strike-popover
@@ -2933,12 +3081,8 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
                         </span>
                       )}
                     </button>
-                    {stockOnlyView ? <div className="stock-option-metric put-data">
-                      <b>{formatOi(oi.pe)}</b>
-                      <small>OI</small>
-                      <small>Vol {formatOi(row.pe?.volume || 0)}</small>
-                    </div> : <button
-                      className={`option-price ${
+                    <button
+                      className={`option-price chain-leg put-leg ${
                         selectedStrike === strike && side === 'PE'
                           ? 'selected'
                           : ''
@@ -2952,13 +3096,10 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
                         setLevelPopoverStrike(null);
                       }}
                     >
-                      {formatPrice(pe)}
-                      <small
-                        className={peChange >= 0 ? 'positive' : 'negative'}
-                      >
-                        {peChange >= 0 ? '+' : ''}
-                        {peChange.toFixed(1)}%
-                      </small>
+                      <span className="chain-metric"><b>{formatPrice(pe)}</b><small className={pePointChange >= 0 ? 'positive' : 'negative'}>{pePointChange >= 0 ? '+' : ''}{formatPrice(pePointChange)} ({peChange >= 0 ? '+' : ''}{peChange.toFixed(1)}%)</small></span>
+                      <span className={`chain-metric oi-strength support ${peOiPercent === 100 ? 'maximum' : peOiPercent > 80 ? 'strong' : peOiPercent === 80 ? 'threshold' : ''}`}><b>{peOiPercent}%</b><small>{formatOi(oi.pe)}</small></span>
+                      <span className={`chain-metric oi-strength support ${peOiChangePercent === 100 ? 'maximum' : peOiChangePercent > 80 ? 'strong' : peOiChangePercent === 80 ? 'threshold' : ''}`}><b>{peOiChangePercent}%</b><small className={peOiChange >= 0 ? 'positive' : 'negative'}>{formatOi(peOiChange)}</small></span>
+                      <span className={`chain-metric oi-strength support ${peVolumePercent === 100 ? 'maximum' : peVolumePercent > 80 ? 'strong' : peVolumePercent === 80 ? 'threshold' : ''}`}><b>{peVolumePercent}%</b><small>{formatOi(row.pe?.volume || 0)}</small></span>
                       {hoveredOption?.key === `${strike}-PE` && (
                         <span className="option-quote-popover put" role="tooltip">
                           <strong>{displayShort} {strike.toLocaleString('en-IN')} PE</strong>
@@ -2972,28 +3113,6 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
                           </> : <em>Loading Dhan quote…</em>}
                         </span>
                       )}
-                    </button>}
-                    <button
-                      type="button"
-                      className="oi-profile"
-                      aria-label={`Open interest details for ${strike.toLocaleString('en-IN')}`}
-                    >
-                      <span
-                        className="oi-bar call"
-                        style={{ width: `${Math.max(5, (oi.ce / maxVisibleOi) * 100)}%` }}
-                      />
-                      <span
-                        className="oi-bar put"
-                        style={{ width: `${Math.max(5, (oi.pe / maxVisibleOi) * 100)}%` }}
-                      />
-                      <span className="oi-tooltip" role="tooltip">
-                        <span>Expiry: <b>{expiry || '—'}</b></span>
-                        <span>Strike: <b>{strike.toLocaleString('en-IN')}</b></span>
-                        <span>CE OI: <b className="call-text">{formatOi(oi.ce)}</b></span>
-                        <span>CE OI Chg: <b className="call-text">{formatOi(ceOiChange)}</b></span>
-                        <span>PE OI: <b className="put-text">{formatOi(oi.pe)}</b></span>
-                        <span>PE OI Chg: <b className="put-text">{formatOi(peOiChange)}</b></span>
-                      </span>
                     </button>
                   </div>
                 );
@@ -3028,6 +3147,7 @@ export default function Home({ canViewPositions }: { canViewPositions: boolean }
           onModeChange={setPaperMode}
           positions={paperPositions}
           engineStatus={paperEngineStatus}
+          snapshots={paperSnapshots}
         />
       )}
       <footer className="statusbar">
